@@ -83,24 +83,33 @@ public enum VaultKey {
     public static func addRecovery(
         _ keyfile: Keyfile, master: SymmetricKey
     ) throws -> (code: String, keyfile: Keyfile) {
-        let code = generateRecoveryCode()
+        let code = try generateRecoveryCode()
         var updated = keyfile
         updated.recovery = try wrap(master: master, secret: normalizeRecovery(code))
         return (code, updated)
     }
 
-    /// Encodes a keyfile to JSON bytes for storage.
-    public static func encode(_ keyfile: Keyfile) -> Data {
-        (try? JSONEncoder().encode(keyfile)) ?? Data()
-    }
-
-    /// Decodes a keyfile from JSON bytes.
-    public static func decode(_ data: Data) throws -> Keyfile {
+    /// Encodes a keyfile to JSON bytes for storage. Throwing so a failed encode can never be
+    /// written over a good keyfile as an empty file.
+    public static func encode(_ keyfile: Keyfile) throws -> Data {
         do {
-            return try JSONDecoder().decode(Keyfile.self, from: data)
+            return try JSONEncoder().encode(keyfile)
         } catch {
             throw VaultError.malformed
         }
+    }
+
+    /// Decodes a keyfile from JSON bytes, rejecting any version this build does not understand
+    /// so a newer keyfile is never treated as a usable vault.
+    public static func decode(_ data: Data) throws -> Keyfile {
+        let keyfile: Keyfile
+        do {
+            keyfile = try JSONDecoder().decode(Keyfile.self, from: data)
+        } catch {
+            throw VaultError.malformed
+        }
+        guard keyfile.version == version else { throw VaultError.unsupportedVersion }
+        return keyfile
     }
 
     /// Wraps a master key under a secret, deriving the key-encryption key with a fresh salt.
