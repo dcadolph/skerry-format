@@ -1,0 +1,113 @@
+# Skerry Note Format
+
+The note format is the contract between every current and future Skerry client. Any program
+that reads and writes this format is a full citizen. The format favors longevity over
+cleverness: plain text, real folders, no proprietary containers.
+
+## Library
+
+A library is any folder. Notes are Markdown files inside it. Subfolders are organizational
+folders, nested to any depth. Nothing about the library requires Skerry to open it.
+
+Reserved entries at the library root:
+
+| Entry      | Purpose                                                          |
+|------------|------------------------------------------------------------------|
+| `.skerry/` | Rebuildable cache (search index, thumbnails). Safe to delete.    |
+| `assets/`  | Attachments referenced by notes via relative links.              |
+
+Folders and files whose names start with a dot are ignored.
+
+## Note file
+
+A note is a UTF-8 text file. Markdown with the `.md` extension is the default and the
+richest citizen; `.markdown` is treated identically. Plain text `.txt` notes carry front
+matter and metadata but render without Markdown styling. HTML `.html` notes are edited as
+source and saved body-only, never gaining a front matter block. An optional front matter
+block carries metadata. Markdown bodies are CommonMark.
+
+```markdown
+---
+id: 7A0E38D2-4CBB-4E30-9A57-2A9F3D1B6C11
+title: Ferry timetable research
+tags: [travel, scotland]
+starred: true
+pinned: false
+archived: false
+created: 2026-07-13T09:30:00Z
+updated: 2026-07-13T10:02:41Z
+---
+
+# Ferry timetable research
+
+Body starts here.
+```
+
+## Front matter
+
+Delimited by `---` lines at the top of the file. Keys are lowercase. Unknown keys are
+preserved on rewrite, never dropped. All keys are optional; a bare Markdown file with no
+front matter is a valid note.
+
+| Key         | Type         | Meaning                                                    |
+|-------------|--------------|------------------------------------------------------------|
+| `id`        | UUID string  | Stable identity across renames and moves.                  |
+| `title`     | string       | Display title. Fallback: first H1, then file name.         |
+| `tags`      | string list  | Inline form `[a, b]`. Tag names are case-insensitive.      |
+| `starred`   | bool         | Shown in the starred view.                                 |
+| `pinned`    | bool         | Pinned to the top of its folder listing.                   |
+| `archived`  | bool         | Hidden from normal views, kept in search behind a filter.  |
+| `locked`    | bool         | Body shown only after device-owner authentication.         |
+| `encrypted` | bool         | Body, title, and tags sealed as ciphertext on disk.        |
+| `created`   | ISO 8601 UTC | Creation time. File birth time is the fallback.            |
+| `updated`   | ISO 8601 UTC | Last content change. File mtime is the fallback.           |
+
+Scalar values are unquoted unless they contain `#`, `:`, or leading/trailing whitespace, in
+which case they are double-quoted. Booleans are `true` or `false`.
+
+A locked note gates its body behind authentication in clients and stays out of full-text
+search indexes. The file itself remains plain text on disk; `locked` is an interface
+guard, not encryption.
+
+## Encryption
+
+An encrypted note protects its contents at rest with a passphrase, so a copy on a synced
+folder, a NAS, or a backup drive reveals nothing about the note. The file is a sealed
+envelope: plain front matter carries only `id` and `encrypted: true`, and the body is the
+base64 blob `salt || nonce || ciphertext || tag`. The ciphertext is the note's full inner
+document, its title and tags and dates and body, encrypted with AES-256-GCM under a key
+derived from the passphrase by PBKDF2-SHA256.
+
+```markdown
+---
+id: 7A0E38D2-4CBB-4E30-9A57-2A9F3D1B6C11
+encrypted: true
+---
+
+c2FsdG5vbmNlY2lwaGVydGV4dGFuZHRhZ2Jhc2U2NA==
+```
+
+The file name is the note's `id` with a `.md` extension, never the title, so the name leaks
+nothing either. Only that an encrypted note exists, its position in the folder tree, and its
+file timestamps are observable without the passphrase. Encrypted notes stay out of the
+search index entirely. The passphrase is the user's alone; a client that lacks it can copy,
+move, and back up the file but cannot read it.
+
+## Attachments
+
+Attachments live in `assets/` at the library root and are referenced with standard relative
+Markdown links, for example `![diagram](../assets/diagram.png)`. Clients must not rewrite
+attachment links they did not create.
+
+## Index
+
+`.skerry/index.db` is a SQLite database with an FTS5 table over title, tags, and body. It is
+a cache: any client may delete and rebuild it at any time, and its absence must never lose
+user data.
+
+## Sync and backup
+
+The library is synced and backed up as ordinary files: iCloud Drive, Syncthing, rsync to a
+NAS, SMB mounts, S3-compatible tools. Skerry defines no sync protocol of its own. Conflicted
+copies produced by file-sync tools appear as sibling files and are surfaced to the user, not
+merged silently.
