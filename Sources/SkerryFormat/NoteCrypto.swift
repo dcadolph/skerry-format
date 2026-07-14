@@ -79,8 +79,29 @@ public enum NoteCrypto {
         return data.count >= saltLength + 12 + 16
     }
 
-    /// Derives an AES key from a passphrase and salt using PBKDF2-SHA256.
-    private static func deriveKey(passphrase: String, salt: Data) throws -> SymmetricKey {
+    /// Seals raw bytes under a provided key, returning `nonce || ciphertext || tag`.
+    ///
+    /// No passphrase derivation happens here; the key is the vault master key. The key hierarchy
+    /// uses this so encryption stays fast, running the slow key derivation only once at unlock.
+    public static func seal(_ plaintext: Data, key: SymmetricKey) throws -> Data {
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        guard let combined = sealed.combined else { throw CryptoError.decryptionFailed }
+        return combined
+    }
+
+    /// Unseals bytes produced by ``seal(_:key:)`` under a provided key.
+    public static func unseal(_ blob: Data, key: SymmetricKey) throws -> Data {
+        do {
+            let box = try AES.GCM.SealedBox(combined: blob)
+            return try AES.GCM.open(box, using: key)
+        } catch {
+            throw CryptoError.decryptionFailed
+        }
+    }
+
+    /// Derives an AES key from a passphrase and salt using PBKDF2-SHA256 at a given cost. The
+    /// key hierarchy runs this once at a high iteration count to unwrap the master key.
+    public static func deriveKey(passphrase: String, salt: Data, iterations: Int) throws -> SymmetricKey {
         var derived = Data(count: keyLength)
         let password = Data(passphrase.utf8)
         let status = derived.withUnsafeMutableBytes { derivedBytes in
@@ -91,7 +112,7 @@ public enum NoteCrypto {
                         passwordBytes.bindMemory(to: Int8.self).baseAddress, password.count,
                         saltBytes.bindMemory(to: UInt8.self).baseAddress, salt.count,
                         CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
-                        iterations,
+                        UInt32(iterations),
                         derivedBytes.bindMemory(to: UInt8.self).baseAddress, keyLength
                     )
                 }
@@ -99,5 +120,10 @@ public enum NoteCrypto {
         }
         guard status == kCCSuccess else { throw CryptoError.keyDerivation }
         return SymmetricKey(data: derived)
+    }
+
+    /// Derives a key at the default per-note iteration count.
+    private static func deriveKey(passphrase: String, salt: Data) throws -> SymmetricKey {
+        try deriveKey(passphrase: passphrase, salt: salt, iterations: Int(iterations))
     }
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -40,6 +41,16 @@ import Testing
         let text = "emoji 🐟 and accents café — kept"
         let blob = try NoteCrypto.encrypt(text, passphrase: "pass")
         #expect(try NoteCrypto.decrypt(blob, passphrase: "pass") == text)
+    }
+
+    @Test func sealAndUnsealWithAKeyRoundTrips() throws {
+        let key = SymmetricKey(size: .bits256)
+        let data = Data("sealed under the master key".utf8)
+        let sealed = try NoteCrypto.seal(data, key: key)
+        #expect(try NoteCrypto.unseal(sealed, key: key) == data)
+        #expect(throws: NoteCrypto.CryptoError.self) {
+            try NoteCrypto.unseal(sealed, key: SymmetricKey(size: .bits256))
+        }
     }
 
     @Test func sealAndUnsealRawBytes() throws {
