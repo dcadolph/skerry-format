@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// EncryptedNote seals a note into an opaque on-disk envelope and unseals it back.
@@ -8,6 +9,55 @@ import Foundation
 /// store the envelope under an opaque id-based file name, so the only thing an observer with
 /// file access learns is that an encrypted note exists.
 public enum EncryptedNote {
+    /// Front matter key marking an envelope sealed under the vault master key, version 2.
+    static let versionKey = "encv"
+    /// Value of the version marker for the master-key format.
+    static let currentVersion = "2"
+
+    /// Whether an envelope is sealed under the vault master key rather than the passphrase.
+    public static func isVersion2(_ envelope: Note) -> Bool {
+        envelope.metadata.unknown.contains { $0.key == versionKey && $0.rawValue == currentVersion }
+    }
+
+    /// Seals a note under the vault master key, the version 2 envelope. No passphrase derivation
+    /// happens here, so encryption stays fast; the master key was unwrapped once at unlock.
+    public static func seal(_ note: Note, key: SymmetricKey) throws -> Note {
+        var inner = note
+        inner.metadata.id = nil
+        inner.metadata.encrypted = false
+        inner.metadata.unknown.removeAll { $0.key == versionKey }
+        let plaintext = FrontMatter.serializeNote(inner)
+        let blob = try NoteCrypto.seal(Data(plaintext.utf8), key: key).base64EncodedString()
+        var envelope = Note()
+        envelope.metadata.id = note.metadata.id
+        envelope.metadata.encrypted = true
+        envelope.metadata.unknown = [(key: versionKey, rawValue: currentVersion)]
+        envelope.body = blob
+        return envelope
+    }
+
+    /// Unseals a version 2 envelope under the vault master key.
+    public static func unseal(_ envelope: Note, key: SymmetricKey) throws -> Note {
+        let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = Data(base64Encoded: trimmed) else { throw NoteCrypto.CryptoError.malformed }
+        let plaintext = try NoteCrypto.unseal(data, key: key)
+        var inner = FrontMatter.parseNote(String(decoding: plaintext, as: UTF8.self))
+        var merged = envelope.metadata
+        if let title = inner.metadata.title { merged.title = title }
+        if !inner.metadata.tags.isEmpty { merged.tags = inner.metadata.tags }
+        merged.starred = merged.starred || inner.metadata.starred
+        merged.pinned = merged.pinned || inner.metadata.pinned
+        merged.archived = merged.archived || inner.metadata.archived
+        merged.locked = merged.locked || inner.metadata.locked
+        if let created = inner.metadata.created { merged.created = created }
+        if let updated = inner.metadata.updated { merged.updated = updated }
+        if !inner.metadata.unknown.isEmpty { merged.unknown = inner.metadata.unknown }
+        merged.unknown.removeAll { $0.key == versionKey }
+        merged.encrypted = true
+        inner.metadata = merged
+        return inner
+    }
+
     /// Seals a plaintext note into an envelope whose body is the encrypted inner document.
     ///
     /// The returned note carries only `id` and `encrypted: true` in its metadata; its body is

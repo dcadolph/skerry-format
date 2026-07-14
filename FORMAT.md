@@ -93,6 +93,18 @@ file timestamps are observable without the passphrase. Encrypted notes stay out 
 search index entirely. The passphrase is the user's alone; a client that lacks it can copy,
 move, and back up the file but cannot read it.
 
+### Master-key format
+
+A library may upgrade to a key hierarchy. A random 256-bit master key encrypts the notes, and
+that master key is itself wrapped by a key derived from the passphrase, stored in a
+`.skerryvault` keyfile at the library root. A note sealed this way carries `encv: 2` in its
+plain front matter, and its body is `base64(nonce || ciphertext || tag)` under the master key,
+with no per-note salt or key derivation. Because the slow derivation runs once at unlock rather
+than per note, the passphrase can use a higher iteration count, changing the passphrase only
+re-wraps the master key, and a recovery code can wrap the same master key as a second way in.
+The keyfile reveals nothing without the passphrase or recovery code, and a note without
+`encv: 2` uses the passphrase-per-note form above, so both coexist during migration.
+
 ## Attachments
 
 Attachments live in `assets/` at the library root and are referenced with standard relative

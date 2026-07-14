@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -94,5 +95,51 @@ import Testing
         #expect(!FrontMatter.serializeNote(envelope).contains("Derived Heading"))
         let restored = try EncryptedNote.unseal(envelope, passphrase: "key")
         #expect(restored.displayTitle == "Derived Heading")
+    }
+
+    @Test func masterKeyEnvelopeRoundTripsAndMarksVersion2() throws {
+        let key = SymmetricKey(size: .bits256)
+        let note = sampleNote()
+        let envelope = try EncryptedNote.seal(note, key: key)
+        #expect(EncryptedNote.isVersion2(envelope))
+        #expect(envelope.metadata.title == nil)
+        #expect(envelope.metadata.tags.isEmpty)
+        #expect(envelope.metadata.id == note.metadata.id)
+        let onDisk = FrontMatter.serializeNote(envelope)
+        #expect(!onDisk.contains("Ferry timetable research"))
+        #expect(onDisk.contains("encv: 2"))
+
+        let restored = try EncryptedNote.unseal(envelope, key: key)
+        #expect(restored.metadata.title == note.metadata.title)
+        #expect(restored.metadata.tags == note.metadata.tags)
+        #expect(restored.body == note.body)
+        #expect(restored.metadata.id == note.metadata.id)
+        #expect(restored.metadata.unknown.isEmpty)
+        #expect(throws: NoteCrypto.CryptoError.self) {
+            try EncryptedNote.unseal(envelope, key: SymmetricKey(size: .bits256))
+        }
+    }
+
+    @Test func passphraseEnvelopeIsNotVersion2() throws {
+        let v1 = try EncryptedNote.seal(sampleNote(), passphrase: "passphrase")
+        #expect(!EncryptedNote.isVersion2(v1))
+    }
+
+    @Test func migratingFromV1ToV2PreservesTheNote() throws {
+        // This mirrors the on-device upgrade: a passphrase-sealed note is read, then re-sealed
+        // under a master key wrapped by the same passphrase, and must still round-trip.
+        let note = sampleNote()
+        let v1 = try EncryptedNote.seal(note, passphrase: "my passphrase")
+        let (master, keyfile) = try VaultKey.create(passphrase: "my passphrase")
+        let opened = try EncryptedNote.unseal(v1, passphrase: "my passphrase")
+        let v2 = try EncryptedNote.seal(opened, key: master)
+        #expect(EncryptedNote.isVersion2(v2))
+
+        let unlockedKey = try VaultKey.unlock(keyfile, passphrase: "my passphrase")
+        let restored = try EncryptedNote.unseal(v2, key: unlockedKey)
+        #expect(restored.metadata.title == note.metadata.title)
+        #expect(restored.metadata.tags == note.metadata.tags)
+        #expect(restored.body == note.body)
+        #expect(restored.metadata.id == note.metadata.id)
     }
 }
