@@ -119,7 +119,22 @@ user data.
 
 ## Sync and backup
 
-The library is synced and backed up as ordinary files: iCloud Drive, Syncthing, rsync to a
-NAS, SMB mounts, S3-compatible tools. Skerry defines no sync protocol of its own. Conflicted
-copies produced by file-sync tools appear as sibling files and are surfaced to the user, not
-merged silently.
+The library syncs and backs up as ordinary files: iCloud Drive, Syncthing, rsync to a NAS,
+SMB mounts, S3-compatible tools. Conflicted copies produced by file-sync tools appear as
+sibling files and are surfaced to the user, not merged silently.
+
+Skerry also ships its own encrypted sync over storage the user owns. On the remote,
+everything lives under a `Skerry Sync/` folder:
+
+| Entry                 | Purpose                                                        |
+|-----------------------|----------------------------------------------------------------|
+| `objects/<id>`        | One library file, AES-256-GCM sealed under the vault master key. The id is the first 32 hex chars of SHA-256 of the file's library-relative path. |
+| `manifest.skmanifest` | Sealed JSON listing every object: path, content hash, update time, and delete tombstones. |
+| `keyfile.skerryvault` | The wrapped vault keyfile, copied verbatim; it is passphrase-wrapped by design. |
+
+The remote only ever holds ciphertext and opaque names. Reconciliation is a three-way merge
+against per-device state in `.skerry/sync-state.json`: edits flow both ways, deletes
+propagate through tombstones that expire after 30 days, an edit beats a delete, and a file
+changed on two devices at once keeps both versions, the remote one as a `(conflict ...)`
+sibling. Files another device deleted are parked under `.skerry/sync-deleted/` for 30 days
+before cleanup.
