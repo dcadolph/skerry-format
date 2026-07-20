@@ -8,7 +8,12 @@ let package = Package(
         .library(name: "SkerryFormat", targets: ["SkerryFormat"]),
     ],
     targets: [
-        .target(name: "SkerryFormat"),
+        // The format library compiles optimized even in debug: the memory-hard KDF is
+        // unusably slow at -Onone.
+        .target(
+            name: "SkerryFormat",
+            swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]
+        ),
         .testTarget(name: "SkerryFormatTests", dependencies: ["SkerryFormat"]),
     ]
 )

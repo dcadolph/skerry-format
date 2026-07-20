@@ -5,6 +5,11 @@ import Testing
 @testable import SkerryFormat
 
 @Suite struct VaultKeyTests {
+    /// Shrinks the Argon2 cost so every wrap in the suite runs in milliseconds.
+    init() {
+        VaultKey.kdfTestOverride = (memory: 64, passes: 1, lanes: 1)
+    }
+
     @Test func createThenUnlockReturnsSameMasterKey() throws {
         let (master, keyfile) = try VaultKey.create(passphrase: "correct horse staple")
         #expect(try VaultKey.unlock(keyfile, passphrase: "correct horse staple") == master)

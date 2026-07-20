@@ -20,11 +20,22 @@ public enum VaultKey {
         case unsupportedVersion
     }
 
-    /// Current keyfile version.
-    public static let version = 2
-    /// PBKDF2 iterations for wrapping the master key, higher than the per-note default because it
-    /// runs once per unlock.
+    /// Current keyfile version. Version 3 added named KDFs with Argon2id as the default;
+    /// version 2 keyfiles still open and upgrade in place after a successful unlock.
+    public static let version = 3
+    /// Versions this build can open.
+    static let supportedVersions = 2...3
+    /// PBKDF2 iterations for version 2 wrappings, kept for reading and upgrades.
     public static let kdfIterations = 600_000
+    /// Argon2id parameters for new wrappings: RFC 9106's memory-constrained
+    /// recommendation, 64 MiB with 3 passes over 4 lanes.
+    public static let argonMemoryKiB = 65_536
+    /// Argon2id pass count for new wrappings.
+    public static let argonPasses = 3
+    /// Argon2id lane count for new wrappings.
+    public static let argonLanes = 4
+    /// Test hook shrinking Argon2 parameters so suites stay fast; nil in production.
+    nonisolated(unsafe) static var kdfTestOverride: (memory: Int, passes: Int, lanes: Int)?
     /// Salt length in bytes for a wrapping.
     private static let saltLength = 16
     /// Master key length in bytes.
@@ -34,10 +45,16 @@ public enum VaultKey {
     public struct Wrapping: Equatable, Sendable, Codable {
         /// Salt for the key-encryption-key derivation.
         public var salt: Data
-        /// Iteration count used to derive the key-encryption key.
+        /// Work parameter: PBKDF2 iteration count, or Argon2 pass count.
         public var iterations: Int
         /// The master key sealed under the derived key: nonce, ciphertext, and tag.
         public var wrapped: Data
+        /// KDF deriving the key-encryption key; nil means the version 2 PBKDF2.
+        public var kdf: String?
+        /// Argon2 memory cost in KiB; nil outside Argon2 wrappings.
+        public var memory: Int?
+        /// Argon2 lane count; nil outside Argon2 wrappings.
+        public var parallelism: Int?
     }
 
     /// A vault keyfile: the wrapped master key, optionally with a recovery wrapping.
@@ -59,15 +76,51 @@ public enum VaultKey {
 
     /// Unwraps the master key from a keyfile using the passphrase.
     public static func unlock(_ keyfile: Keyfile, passphrase: String) throws -> SymmetricKey {
-        guard keyfile.version == version else { throw VaultError.unsupportedVersion }
+        guard supportedVersions.contains(keyfile.version) else {
+            throw VaultError.unsupportedVersion
+        }
         return try unwrap(keyfile.passphrase, secret: passphrase)
     }
 
     /// Unwraps the master key using the recovery code.
     public static func unlock(_ keyfile: Keyfile, recovery code: String) throws -> SymmetricKey {
-        guard keyfile.version == version else { throw VaultError.unsupportedVersion }
+        guard supportedVersions.contains(keyfile.version) else {
+            throw VaultError.unsupportedVersion
+        }
         guard let recovery = keyfile.recovery else { throw VaultError.wrongSecret }
         return try unwrap(recovery, secret: normalizeRecovery(code))
+    }
+
+    /// Whether a keyfile's passphrase wrapping still uses the version 2 PBKDF2.
+    public static func needsKDFUpgrade(_ keyfile: Keyfile) -> Bool {
+        (keyfile.passphrase.kdf ?? "pbkdf2") != "argon2id"
+    }
+
+    /// Whether a keyfile's recovery wrapping still uses the version 2 PBKDF2.
+    public static func needsRecoveryKDFUpgrade(_ keyfile: Keyfile) -> Bool {
+        guard let recovery = keyfile.recovery else { return false }
+        return (recovery.kdf ?? "pbkdf2") != "argon2id"
+    }
+
+    /// Re-wraps the passphrase wrapping under Argon2id after a successful unlock. The
+    /// recovery wrapping upgrades separately, the next time the code itself is used.
+    public static func upgradeKDF(
+        _ keyfile: Keyfile, master: SymmetricKey, passphrase: String
+    ) throws -> Keyfile {
+        var updated = keyfile
+        updated.version = version
+        updated.passphrase = try wrap(master: master, secret: passphrase)
+        return updated
+    }
+
+    /// Re-wraps the recovery wrapping under Argon2id after a successful recovery unlock.
+    public static func upgradeRecoveryKDF(
+        _ keyfile: Keyfile, master: SymmetricKey, recovery code: String
+    ) throws -> Keyfile {
+        var updated = keyfile
+        updated.version = version
+        updated.recovery = try wrap(master: master, secret: normalizeRecovery(code))
+        return updated
     }
 
     /// Re-wraps the master key under a new passphrase, keeping any recovery wrapping.
@@ -108,29 +161,61 @@ public enum VaultKey {
         } catch {
             throw VaultError.malformed
         }
-        guard keyfile.version == version else { throw VaultError.unsupportedVersion }
+        guard supportedVersions.contains(keyfile.version) else {
+            throw VaultError.unsupportedVersion
+        }
         return keyfile
     }
 
-    /// Wraps a master key under a secret, deriving the key-encryption key with a fresh salt.
+    /// Wraps a master key under a secret with a fresh salt, using Argon2id.
     private static func wrap(master: SymmetricKey, secret: String) throws -> Wrapping {
         var salt = Data(count: saltLength)
         let generated = salt.withUnsafeMutableBytes {
             SecRandomCopyBytes(kSecRandomDefault, saltLength, $0.baseAddress!)
         }
         guard generated == errSecSuccess else { throw VaultError.malformed }
-        let kek = try NoteCrypto.deriveKey(
-            passphrase: secret, salt: salt, iterations: kdfIterations
+        let memory = kdfTestOverride?.memory ?? argonMemoryKiB
+        let passes = kdfTestOverride?.passes ?? argonPasses
+        let lanes = kdfTestOverride?.lanes ?? argonLanes
+        let kek = try deriveKEK(
+            secret: secret, salt: salt, kdf: "argon2id",
+            iterations: passes, memory: memory, parallelism: lanes
         )
         let masterBytes = master.withUnsafeBytes { Data($0) }
         let wrapped = try NoteCrypto.seal(masterBytes, key: kek)
-        return Wrapping(salt: salt, iterations: kdfIterations, wrapped: wrapped)
+        return Wrapping(
+            salt: salt, iterations: passes, wrapped: wrapped,
+            kdf: "argon2id", memory: memory, parallelism: lanes
+        )
+    }
+
+    /// Derives the key-encryption key with a wrapping's named KDF.
+    private static func deriveKEK(
+        secret: String, salt: Data, kdf: String?, iterations: Int,
+        memory: Int?, parallelism: Int?
+    ) throws -> SymmetricKey {
+        switch kdf ?? "pbkdf2" {
+        case "argon2id":
+            let raw = Argon2id.deriveKey(
+                password: Data(secret.utf8), salt: salt,
+                memoryKiB: memory ?? argonMemoryKiB, iterations: iterations,
+                parallelism: parallelism ?? argonLanes, outputLength: masterKeyLength
+            )
+            return SymmetricKey(data: raw)
+        case "pbkdf2":
+            return try NoteCrypto.deriveKey(passphrase: secret, salt: salt, iterations: iterations)
+        default:
+            // An unknown KDF means a newer client wrote this keyfile.
+            throw VaultError.unsupportedVersion
+        }
     }
 
     /// Unwraps a master key from a wrapping, mapping crypto failures to a wrong-secret error.
     private static func unwrap(_ wrapping: Wrapping, secret: String) throws -> SymmetricKey {
-        let kek = try NoteCrypto.deriveKey(
-            passphrase: secret, salt: wrapping.salt, iterations: wrapping.iterations
+        let kek = try deriveKEK(
+            secret: secret, salt: wrapping.salt, kdf: wrapping.kdf,
+            iterations: wrapping.iterations, memory: wrapping.memory,
+            parallelism: wrapping.parallelism
         )
         do {
             let raw = try NoteCrypto.unseal(wrapping.wrapped, key: kek)

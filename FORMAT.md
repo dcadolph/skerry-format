@@ -105,6 +105,23 @@ re-wraps the master key, and a recovery code can wrap the same master key as a s
 The keyfile reveals nothing without the passphrase or recovery code, and a note without
 `encv: 2` uses the passphrase-per-note form above, so both coexist during migration.
 
+### Keyfile versions and key derivation
+
+Each wrapping in the keyfile names its KDF, so the derivation can strengthen over time
+without breaking older libraries:
+
+- Version 2 wrappings carry no `kdf` field and use PBKDF2-SHA256 with the stored iteration
+  count (600,000 by default).
+- Version 3 wrappings carry `kdf: "argon2id"` with `memory` (KiB), `iterations` (passes),
+  and `parallelism` (lanes). New wrappings use RFC 9106's memory-constrained
+  recommendation: 64 MiB, 3 passes, 4 lanes. Argon2id is memory-hard, which makes GPU and
+  ASIC password guessing dramatically more expensive than PBKDF2 allows.
+
+A client that opens a version 2 keyfile re-wraps the passphrase wrapping under Argon2id
+after the first successful unlock; the recovery wrapping upgrades the next time the
+recovery code itself is used, since upgrading requires the secret in hand. A wrapping with
+an unrecognized `kdf` name must be refused, never guessed at.
+
 ## Attachments
 
 Attachments live in `assets/` at the library root and are referenced with standard relative
