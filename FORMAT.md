@@ -122,6 +122,20 @@ after the first successful unlock; the recovery wrapping upgrades the next time 
 recovery code itself is used, since upgrading requires the secret in hand. A wrapping with
 an unrecognized `kdf` name must be refused, never guessed at.
 
+### Cipher agility
+
+AES-256-GCM is the default everywhere. ChaCha20-Poly1305 is available as an alternative;
+both produce `nonce || ciphertext || tag` with a 12-byte nonce and a 16-byte tag, so blobs
+keep one shape across ciphers. Where the cipher is recorded:
+
+- A master-key note envelope sealed with a non-default cipher carries `encv: 3` and
+  `alg: chacha20poly1305` in its plain front matter. `encv: 2` always means AES-256-GCM.
+- A keyfile wrapping names its cipher in a `cipher` field; absence means AES-256-GCM. An
+  unrecognized name must be refused.
+- Sealed attachments (`.skbox`) and sync objects carry no framing; a reader tries each
+  cipher, and the authentication tag guarantees only the right one opens. A wrong-cipher
+  attempt can never produce wrong plaintext, only failure.
+
 ## Attachments
 
 Attachments live in `assets/` at the library root and are referenced with standard relative

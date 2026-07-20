@@ -55,6 +55,8 @@ public enum VaultKey {
         public var memory: Int?
         /// Argon2 lane count; nil outside Argon2 wrappings.
         public var parallelism: Int?
+        /// AEAD sealing the wrapped master key; nil means AES-256-GCM.
+        public var cipher: String?
     }
 
     /// A vault keyfile: the wrapped master key, optionally with a recovery wrapping.
@@ -182,12 +184,16 @@ public enum VaultKey {
             iterations: passes, memory: memory, parallelism: lanes
         )
         let masterBytes = master.withUnsafeBytes { Data($0) }
-        let wrapped = try NoteCrypto.seal(masterBytes, key: kek)
+        let wrapped = try NoteCrypto.seal(masterBytes, key: kek, cipher: sealingCipher)
         return Wrapping(
             salt: salt, iterations: passes, wrapped: wrapped,
-            kdf: "argon2id", memory: memory, parallelism: lanes
+            kdf: "argon2id", memory: memory, parallelism: lanes,
+            cipher: sealingCipher == .aesGCM ? nil : sealingCipher.rawValue
         )
     }
+
+    /// Cipher new wrappings seal with; the app sets this from the library's choice.
+    nonisolated(unsafe) public static var sealingCipher: NoteCrypto.Cipher = .aesGCM
 
     /// Derives the key-encryption key with a wrapping's named KDF.
     private static func deriveKEK(
@@ -217,8 +223,13 @@ public enum VaultKey {
             iterations: wrapping.iterations, memory: wrapping.memory,
             parallelism: wrapping.parallelism
         )
+        guard let cipher = wrapping.cipher.map(NoteCrypto.Cipher.init(rawValue:)) ?? .aesGCM
+        else {
+            // An unknown cipher name means a newer client wrote this keyfile.
+            throw VaultError.unsupportedVersion
+        }
         do {
-            let raw = try NoteCrypto.unseal(wrapping.wrapped, key: kek)
+            let raw = try NoteCrypto.unseal(wrapping.wrapped, key: kek, cipher: cipher)
             guard raw.count == masterKeyLength else { throw VaultError.malformed }
             return SymmetricKey(data: raw)
         } catch is NoteCrypto.CryptoError {

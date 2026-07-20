@@ -9,38 +9,65 @@ import Foundation
 /// store the envelope under an opaque id-based file name, so the only thing an observer with
 /// file access learns is that an encrypted note exists.
 public enum EncryptedNote {
-    /// Front matter key marking an envelope sealed under the vault master key, version 2.
+    /// Front matter key marking an envelope sealed under the vault master key.
     static let versionKey = "encv"
-    /// Value of the version marker for the master-key format.
-    static let currentVersion = "2"
+    /// Version marker for the AES-GCM master-key format.
+    static let versionAES = "2"
+    /// Version marker for envelopes that also name their cipher.
+    static let versionTagged = "3"
+    /// Front matter key naming the cipher on version 3 envelopes.
+    static let cipherKey = "alg"
 
     /// Whether an envelope is sealed under the vault master key rather than the passphrase.
-    public static func isVersion2(_ envelope: Note) -> Bool {
-        envelope.metadata.unknown.contains { $0.key == versionKey && $0.rawValue == currentVersion }
+    public static func usesMasterKey(_ envelope: Note) -> Bool {
+        envelope.metadata.unknown.contains {
+            $0.key == versionKey && ($0.rawValue == versionAES || $0.rawValue == versionTagged)
+        }
     }
 
-    /// Seals a note under the vault master key, the version 2 envelope. No passphrase derivation
-    /// happens here, so encryption stays fast; the master key was unwrapped once at unlock.
-    public static func seal(_ note: Note, key: SymmetricKey) throws -> Note {
+    /// Kept name for the AES master-key check; version 3 envelopes count too.
+    public static func isVersion2(_ envelope: Note) -> Bool {
+        usesMasterKey(envelope)
+    }
+
+    /// The cipher a master-key envelope is sealed with.
+    static func cipher(of envelope: Note) -> NoteCrypto.Cipher {
+        let named = envelope.metadata.unknown.first { $0.key == cipherKey }?.rawValue
+        return named.flatMap(NoteCrypto.Cipher.init(rawValue:)) ?? .aesGCM
+    }
+
+    /// Seals a note under the vault master key. AES-GCM writes the version 2 envelope every
+    /// client reads; another cipher writes version 3 with the cipher named in front matter.
+    public static func seal(
+        _ note: Note, key: SymmetricKey, cipher: NoteCrypto.Cipher = .aesGCM
+    ) throws -> Note {
         var inner = note
         inner.metadata.id = nil
         inner.metadata.encrypted = false
-        inner.metadata.unknown.removeAll { $0.key == versionKey }
+        inner.metadata.unknown.removeAll { $0.key == versionKey || $0.key == cipherKey }
         let plaintext = FrontMatter.serializeNote(inner)
-        let blob = try NoteCrypto.seal(Data(plaintext.utf8), key: key).base64EncodedString()
+        let blob = try NoteCrypto.seal(Data(plaintext.utf8), key: key, cipher: cipher)
+            .base64EncodedString()
         var envelope = Note()
         envelope.metadata.id = note.metadata.id
         envelope.metadata.encrypted = true
-        envelope.metadata.unknown = [(key: versionKey, rawValue: currentVersion)]
+        if cipher == .aesGCM {
+            envelope.metadata.unknown = [(key: versionKey, rawValue: versionAES)]
+        } else {
+            envelope.metadata.unknown = [
+                (key: versionKey, rawValue: versionTagged),
+                (key: cipherKey, rawValue: cipher.rawValue),
+            ]
+        }
         envelope.body = blob
         return envelope
     }
 
-    /// Unseals a version 2 envelope under the vault master key.
+    /// Unseals a master-key envelope, honoring the cipher it names.
     public static func unseal(_ envelope: Note, key: SymmetricKey) throws -> Note {
         let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = Data(base64Encoded: trimmed) else { throw NoteCrypto.CryptoError.malformed }
-        let plaintext = try NoteCrypto.unseal(data, key: key)
+        let plaintext = try NoteCrypto.unseal(data, key: key, cipher: cipher(of: envelope))
         var inner = FrontMatter.parseNote(String(decoding: plaintext, as: UTF8.self))
         var merged = envelope.metadata
         if let title = inner.metadata.title { merged.title = title }
@@ -52,7 +79,7 @@ public enum EncryptedNote {
         if let created = inner.metadata.created { merged.created = created }
         if let updated = inner.metadata.updated { merged.updated = updated }
         if !inner.metadata.unknown.isEmpty { merged.unknown = inner.metadata.unknown }
-        merged.unknown.removeAll { $0.key == versionKey }
+        merged.unknown.removeAll { $0.key == versionKey || $0.key == cipherKey }
         merged.encrypted = true
         inner.metadata = merged
         return inner

@@ -79,24 +79,68 @@ public enum NoteCrypto {
         return data.count >= saltLength + 12 + 16
     }
 
+    /// AEAD cipher a blob is sealed with. Both produce `nonce || ciphertext || tag` with a
+    /// 12-byte nonce and a 16-byte tag, so blobs keep one shape across ciphers.
+    public enum Cipher: String, CaseIterable, Sendable {
+        /// AES-256-GCM, the default since the first release.
+        case aesGCM = "aes-gcm"
+        /// ChaCha20-Poly1305, constant-time everywhere without hardware AES.
+        case chaCha20Poly1305 = "chacha20poly1305"
+
+        /// Display name for pickers.
+        public var label: String {
+            switch self {
+            case .aesGCM: return "AES-256-GCM"
+            case .chaCha20Poly1305: return "ChaCha20-Poly1305"
+            }
+        }
+    }
+
     /// Seals raw bytes under a provided key, returning `nonce || ciphertext || tag`.
     ///
     /// No passphrase derivation happens here; the key is the vault master key. The key hierarchy
     /// uses this so encryption stays fast, running the slow key derivation only once at unlock.
-    public static func seal(_ plaintext: Data, key: SymmetricKey) throws -> Data {
-        let sealed = try AES.GCM.seal(plaintext, using: key)
-        guard let combined = sealed.combined else { throw CryptoError.decryptionFailed }
-        return combined
+    public static func seal(
+        _ plaintext: Data, key: SymmetricKey, cipher: Cipher = .aesGCM
+    ) throws -> Data {
+        switch cipher {
+        case .aesGCM:
+            let sealed = try AES.GCM.seal(plaintext, using: key)
+            guard let combined = sealed.combined else { throw CryptoError.decryptionFailed }
+            return combined
+        case .chaCha20Poly1305:
+            return try ChaChaPoly.seal(plaintext, using: key).combined
+        }
     }
 
-    /// Unseals bytes produced by ``seal(_:key:)`` under a provided key.
-    public static func unseal(_ blob: Data, key: SymmetricKey) throws -> Data {
+    /// Unseals bytes produced by ``seal(_:key:cipher:)`` under a provided key and cipher.
+    public static func unseal(
+        _ blob: Data, key: SymmetricKey, cipher: Cipher = .aesGCM
+    ) throws -> Data {
         do {
-            let box = try AES.GCM.SealedBox(combined: blob)
-            return try AES.GCM.open(box, using: key)
+            switch cipher {
+            case .aesGCM:
+                let box = try AES.GCM.SealedBox(combined: blob)
+                return try AES.GCM.open(box, using: key)
+            case .chaCha20Poly1305:
+                let box = try ChaChaPoly.SealedBox(combined: blob)
+                return try ChaChaPoly.open(box, using: key)
+            }
         } catch {
             throw CryptoError.decryptionFailed
         }
+    }
+
+    /// Unseals a blob whose cipher is not recorded, trying each in turn. The wrong cipher
+    /// always fails authentication, so a success identifies the cipher with certainty.
+    /// Used for sealed attachments and sync objects, which carry no framing.
+    public static func unsealAny(_ blob: Data, key: SymmetricKey) throws -> Data {
+        for cipher in Cipher.allCases {
+            if let opened = try? unseal(blob, key: key, cipher: cipher) {
+                return opened
+            }
+        }
+        throw CryptoError.decryptionFailed
     }
 
     /// Derives an AES key from a passphrase and salt using PBKDF2-SHA256 at a given cost. The
