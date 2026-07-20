@@ -14,21 +14,46 @@ the crypto, nothing about the app.
 ## What is here
 
 - **FORMAT.md** — the note format contract: front matter, encryption envelope, attachments.
-- **NoteCrypto** — AES-256-GCM with a key derived from a passphrase by PBKDF2-SHA256.
+- **NoteCrypto** — authenticated sealing with AES-256-GCM or ChaCha20-Poly1305, chosen per
+  envelope and recorded in it.
+- **Argon2** — Argon2id (RFC 9106) implemented from scratch and gated on the RFC's own test
+  vectors, deriving keys from passphrases.
+- **VaultKey** — the master-key hierarchy: one random 256-bit key encrypts the library, wrapped
+  separately by the passphrase and by a recovery code, so changing the passphrase re-wraps one
+  key instead of re-encrypting every note.
 - **EncryptedNote** — seals a note into an opaque envelope so its title, tags, dates, and body
   are all ciphertext and the file name reveals nothing.
 - **EncryptedBackup** — seals a whole library into a single encrypted blob for off-device storage.
 - **Note**, **FrontMatter** — the note model and the front matter parser, so a client can read
   and write the format.
+- **skerry** — a command-line reader proving there is no lock-in.
 
 ## Encryption at a glance
 
-A passphrase derives a 256-bit key with PBKDF2-SHA256 (210,000 iterations, a random 16-byte
-salt). AES-256-GCM encrypts the plaintext with a random nonce and an authentication tag. The
-stored blob is `base64(salt || nonce || ciphertext || tag)`, so a note file stays plain UTF-8
-text and remains safe to sync while its contents are unreadable without the passphrase. The
-passphrase never touches disk; a client that lacks it can copy, move, and back up the file but
-cannot read it.
+A random 256-bit master key seals notes with AES-256-GCM by default, ChaCha20-Poly1305 as a
+choice; every envelope is authenticated, so tampered files fail to open rather than opening
+wrong. The master key is wrapped by a key derived from the passphrase with Argon2id (64 MiB,
+3 passes, 4 lanes) and stored in a keyfile beside the notes; a recovery code is a second,
+independent wrapping of the same key. Sealed blobs are base64 inside ordinary front matter,
+so a note file stays plain UTF-8 text and remains safe to sync while its contents are
+unreadable without the passphrase. Legacy per-note envelopes (PBKDF2-SHA256, 210,000
+iterations) still open and upgrade on their next unlock.
+
+## The command-line reader
+
+Your notes must never need our app. The `skerry` executable in this repo lists, reads,
+verifies, and restores a library using only the code you see here:
+
+```
+swift run skerry list ~/Notes
+swift run skerry read ~/Notes "Harbor/Rope.md"
+swift run skerry verify ~/Notes
+SKERRY_PASSPHRASE=... swift run skerry restore-backup vault.skerrybackup ./restored
+```
+
+Sealed notes unlock with `SKERRY_PASSPHRASE` or `SKERRY_RECOVERY` in the environment, tried
+against the `.skerryvault` keyfile at the library root. Without a credential, sealed notes
+list as sealed and everything else reads normally.
 
 ## Build and test
 
