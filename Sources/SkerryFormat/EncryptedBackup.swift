@@ -23,6 +23,9 @@ public enum EncryptedBackup {
     /// Entries never included, matching the plaintext backup: the rebuildable cache.
     private static let skipped: Set<String> = [".skerry"]
 
+    /// Prefix for the temporary copies a restore stages before swapping them into place.
+    private static let restorePrefix = ".skerry-restore-"
+
     /// A single sealed snapshot on disk.
     public struct Snapshot: Equatable, Sendable {
         /// Timestamp-based file name without extension.
@@ -127,18 +130,59 @@ public enum EncryptedBackup {
         return data
     }
 
-    /// Reconstructs the library tree from a decrypted archive blob.
+    /// Reconstructs the library tree from a decrypted archive blob, exactly and atomically.
+    ///
+    /// Like the plaintext restore, this is an exact replace: entries the archive omits are removed
+    /// so the library reproduces the snapshot instead of merging into the current tree. Every entry
+    /// is written to a temporary sibling first and only swapped into place once all writes succeed,
+    /// so a failed write leaves the library untouched and no reader sees a half-written note. The
+    /// rebuildable `.skerry` cache is left in place.
     private static func unpack(_ archive: Data, into library: URL) throws {
         guard let root = FileWrapper(serializedRepresentation: archive), root.isDirectory else {
             throw BackupError.corrupt
         }
-        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-        for (name, child) in root.fileWrappers ?? [:] {
-            let target = library.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
+        let fm = FileManager.default
+        try fm.createDirectory(at: library, withIntermediateDirectories: true)
+        clearRestoreTemporaries(in: library)
+
+        let children = root.fileWrappers ?? [:]
+        let wantedNames = Set(children.keys)
+
+        var staged: [(temp: URL, target: URL)] = []
+        do {
+            for (name, child) in children {
+                let temp = library.appendingPathComponent(restorePrefix + UUID().uuidString)
+                try child.write(to: temp, options: [], originalContentsURL: nil)
+                staged.append((temp, library.appendingPathComponent(name)))
             }
-            try child.write(to: target, options: [], originalContentsURL: nil)
+        } catch {
+            for item in staged { try? fm.removeItem(at: item.temp) }
+            throw error
+        }
+
+        for item in staged {
+            if fm.fileExists(atPath: item.target.path) {
+                _ = try fm.replaceItemAt(item.target, withItemAt: item.temp)
+            } else {
+                try fm.moveItem(at: item.temp, to: item.target)
+            }
+        }
+        let current = try fm.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)
+        for entry in current {
+            let name = entry.lastPathComponent
+            guard !skipped.contains(name), !name.hasPrefix(restorePrefix) else { continue }
+            if !wantedNames.contains(name) { try fm.removeItem(at: entry) }
+        }
+    }
+
+    /// Removes any staging copies an interrupted restore left behind in the library root.
+    private static func clearRestoreTemporaries(in library: URL) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: library, includingPropertiesForKeys: nil
+        ) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix(restorePrefix) {
+            try? fm.removeItem(at: entry)
         }
     }
 
